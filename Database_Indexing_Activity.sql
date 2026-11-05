@@ -65,6 +65,12 @@ SELECT n,
 FROM seq
 WHERE n <= 20000;
 
+-- Try this: predict the names first
+
+SELECT customer_id, full_name, email
+FROM customers
+WHERE customer_id IN (1, 2, 11, 12, 24, 4242);
+
 -- 1d. Products (2,000 rows)
 
 CREATE TABLE products (
@@ -205,6 +211,9 @@ LIMIT 20;
 -- Step 3. Add an index
 -- ==================================================================
 
+EXPLAIN
+SELECT * FROM orders WHERE order_id = 1999;
+
 CREATE INDEX idx_cust ON orders (customer_id);
 
 EXPLAIN
@@ -233,6 +242,18 @@ SHOW INDEX FROM orders;
 DROP INDEX idx_cust ON orders;
 CREATE INDEX idx_cust_date ON orders (customer_id, order_date);
 
+SELECT customer_id, order_date, order_id
+FROM orders
+WHERE customer_id BETWEEN 4241 AND 4243
+ORDER BY customer_id, order_date;
+
+SHOW INDEX FROM orders;
+
+SELECT COUNT(*)                                AS entries,
+       COUNT(DISTINCT customer_id)             AS customers,
+       COUNT(DISTINCT customer_id, order_date) AS customer_date
+FROM orders;
+
 EXPLAIN
 SELECT order_id, order_date, status, total_amount
 FROM orders
@@ -246,6 +267,18 @@ FROM orders
 WHERE customer_id = 4242
 ORDER BY order_date DESC
 LIMIT 20;
+
+-- Try this: the same query with and without the index
+
+SELECT order_id, order_date, status, total_amount
+FROM orders IGNORE INDEX (idx_cust_date)
+WHERE customer_id = 4242
+ORDER BY order_date DESC;
+
+SELECT order_id, order_date, status, total_amount
+FROM orders
+WHERE customer_id = 4242
+ORDER BY order_date DESC;
 
 -- Try this: change the ORDER BY
 

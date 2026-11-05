@@ -107,6 +107,43 @@ WHERE n <= 20000;
 
 The other columns follow the same idea. City and province use the same position `1 + (n * 7) % 8` in two lists, so a Toronto customer is always in ON. The segment list holds Consumer seven times, Student twice and Business once, so 70% of customers are consumers. The sign-up date is 1 January 2021 plus between 0 and 1,699 days.
 
+**How the first name is chosen.** `ELT(k, ...)` returns the k-th name in the list, and `k = 1 + n % 12`:
+
+| customer n | n % 12 | k = 1 + n % 12 | first name |
+|---|---|---|---|
+| 1 | 1 | 2 | li |
+| 2 | 2 | 3 | arjun |
+| 6 | 6 | 7 | omar |
+| 11 | 11 | 12 | olivia |
+| **12** | **0** | **1** | **maria** |
+| 13 | 1 | 2 | li |
+| 4242 | 6 | 7 | omar |
+
+So customer 1 is Li, not Maria: `maria` comes up only when n is a multiple of 12 (customers 12, 24, 36, ...). Customer 4242 is Omar because 4242 % 12 = 6. The surname uses `n DIV 12` (whole-number division), so it changes once every 12 customers.
+
+#### Try this: predict the names first
+
+Before running it, predict the first names of customers 1, 2, 11, 12, 24 and 4242:
+
+```sql
+SELECT customer_id, full_name, email
+FROM customers
+WHERE customer_id IN (1, 2, 11, 12, 24, 4242);
+```
+
+Output:
+
+| customer_id | full_name | email |
+|---|---|---|
+| 1 | Li Chen | li.1@gmail.com |
+| 2 | Arjun Chen | arjun.2@gmail.com |
+| 11 | Olivia Chen | olivia.11@outlook.com |
+| 12 | Maria Singh | maria.12@outlook.com |
+| 24 | Maria Ahmed | maria.24@algomau.ca |
+| 4242 | Omar Tremblay | omar.4242@yahoo.ca |
+
+<sub>6 rows returned in 0.0014 sec</sub>
+
 ### 1d. Products (2,000 rows)
 
 ```sql
@@ -223,6 +260,8 @@ Output:
 
 <sub>4 rows returned in 0.0285 sec</sub>
 
+This counts the rows of all four tables and shows the counts together. `UNION ALL` stacks the rows of several `SELECT`s into one result, so you get one small table instead of four separate result tabs. Each `SELECT` returns a text label (`'customers'` is a fixed string, not a table name) and a count. Only the first `SELECT` names the columns (`AS tbl`, `AS row_count`), because a `UNION` always takes its column names from the first query. `ALL` keeps every row as it is; plain `UNION` would also check for duplicate rows, which is wasted work here because the four labels are all different.
+
 **Check your output.** If your counts match, your data is identical to ours, row for row. If a block fails with “Error Code: 2013. Lost connection to MySQL server during query”, Workbench stopped waiting: go to Edit > Preferences > SQL Editor, set “DBMS connection read timeout” to 600 seconds, reconnect and run it again.
 
 #### Try this: look at the generated data
@@ -257,7 +296,18 @@ Output:
 
 <sub>1 row returned in 0.0033 sec</sub>
 
-One row: the `PRIMARY` index on `order_id`. **Cardinality** is MySQL's estimate of how many distinct values the indexed column holds; for a primary key that is about the number of rows. **BTREE** is the structure of the index, explained in Step 3.
+One row: the table has exactly one index, the `PRIMARY` key on `order_id`, which MySQL created automatically. There is nothing for `customer_id` yet, and that is why the query in Step 2 is slow.
+
+**This output describes the index; it does not show the data inside it.** Each row of `SHOW INDEX` describes one column of one index. The index itself has 200,000 entries, one per order. Think of it as the label on a box, not the contents of the box. The most useful columns are:
+
+| Column | Our value | Meaning |
+|---|---|---|
+| `Key_name` | PRIMARY | Name of the index. The primary key is always called PRIMARY. |
+| `Non_unique` | 0 | 0 = values must be unique (no two orders share an id). 1 = duplicates allowed. |
+| `Seq_in_index` | 1 | Position of this column inside the index. A two-column index shows two rows, numbered 1 and 2. |
+| `Column_name` | order_id | The indexed column. |
+| `Cardinality` | about 200,000 | MySQL's **estimate** of the number of distinct values. It samples a few pages, so your number will be slightly different. |
+| `Index_type` | BTREE | The structure of the index: a B+tree (Step 3). |
 
 ## Step 2. Ask MySQL how it runs the slow query
 
@@ -309,6 +359,8 @@ Output:
 
 <sub>1 row returned in 0.0004 sec</sub>
 
+**Your output looks different?** If it is a single column named `EXPLAIN` with text like `-> Limit: 20 row(s) ...`, your MySQL version (8.0.32 or newer) is set to show plans as a tree. Run `SET explain_format = TRADITIONAL;` once, or write `EXPLAIN FORMAT=TRADITIONAL`, to get the table shown here.
+
 **What the output means.** Each column describes one part of the plan:
 
 | Column | Meaning | Here |
@@ -345,15 +397,57 @@ Output:
 
 <sub>1 row returned (the plan, as text)</sub>
 
-**How to read it.** Start at the most indented line and read upward; each line feeds the one above. Inside the brackets, `cost` and `rows` are the optimizer's estimates; `actual time=first..last` is the real time in milliseconds until the first and the last row; `rows=200000` means 200,000 rows were produced; `loops` is how often the step ran. So: **scan 200,000 orders (30 ms), keep the 15 that belong to customer 4242, sort them, return them.** MySQL read 200,000 rows to return fifteen.
+**How to read it.** The plan is a **pipeline**. Each line is one step. Rows enter at the bottom, each step does one job and passes its rows up, and the top line hands the result to you. So read it **from the bottom line up**:
+
+```text
+ 4. Limit        keep at most 20                -->  15 rows to you
+       ^
+ 3. Sort         newest first (order_date)      -->  15 rows
+       ^
+ 2. Filter       keep customer_id = 4242        -->  15 rows survive
+       ^
+ 1. Table scan   read every order               -->  200,000 rows
+```
+
+| Step | Line in the output | What it does | Rows out |
+|---|---|---|---|
+| 1 | `Table scan on orders` | Reads every row of the table, from order 1 to order 200,000 | 200,000 |
+| 2 | `Filter: (orders.customer_id = 4242)` | Checks each row: is it Omar's? Throws the others away | 15 |
+| 3 | `Sort: orders.order_date DESC` | Puts Omar's 15 orders newest first | 15 |
+| 4 | `Limit: 20 row(s)` | Stops at 20 rows; Omar has only 15, so all pass | 15 |
+
+MySQL did 200,000 rows of work to give you 15. That is the whole problem in one picture.
+
+**The two brackets on every line.** The first bracket is the optimizer's **guess**, made before running; the second is the **measurement**, made while running (only `EXPLAIN ANALYZE` has it):
+
+```text
+(cost=20118 rows=199496)   (actual time=0.209..30.5 rows=200000 loops=1)
+ \__ the plan: a guess __/    \_________ what really happened _________/
+```
+
+- `cost`: an abstract work score; bigger means more work. It is not milliseconds.
+
+- `rows` (first bracket): how many rows the step was expected to produce.
+
+- `actual time=A..B`: milliseconds from the start until the step produced its **first** row (A) and its **last** row (B). Each time includes the steps below it.
+
+- `rows` (second bracket): how many rows the step really produced. `loops`: how many times the step ran.
+
+| Step | actual time | What the numbers say |
+|---|---|---|
+| Table scan | 0.209..**30.5** | Finished reading all 200,000 rows after 30.5 ms. |
+| Filter | 2.31..**38.1** | Found Omar's first order after 2.31 ms, but had to check every row to the end to be sure there were no more. |
+| Sort, Limit | 38.1..38.1 | Sorting 15 rows takes almost no time. |
+
+So about **30 of the 38 ms are spent reading rows that are thrown away**. An index removes exactly that step. Notice also that the optimizer guessed 199,496 rows would pass the filter, but only 15 did: with no index on `customer_id`, MySQL knows very little about that column.
 
 ### Why is reading every row slow?
 
-MySQL's storage engine, InnoDB, stores a table in **pages**: fixed 16 KB blocks holding a few hundred rows each. MySQL always reads whole pages. The orders table is about 670 pages. Omar's 15 orders were placed on different days over two years, so they sit on 15 different pages scattered through the table. Without an index there is no way to know which ones, so every page is read. Pages already in memory sit in the **buffer pool**, InnoDB's cache in RAM; reading from disk instead is roughly a thousand times slower.
+MySQL's storage engine, InnoDB, stores a table in **pages**: fixed 16 KB blocks holding a few hundred rows each. MySQL always reads whole pages. The orders table is about 670 pages; 621 of them hold the rows themselves, about 320 orders each. Omar's 15 orders were placed on different days over two years, so they sit on 15 different pages scattered through the table. Without an index there is no way to know which ones, so every page is read. Pages already in memory sit in the **buffer pool**, InnoDB's cache in RAM; reading from disk instead is roughly a thousand times slower.
 
 ![scan](figures/fig_scan.png)
 
-*Figure 5. A full table scan: every page (grey) is read to find the few pages that hold matching rows (blue).*
+*Figure 5. The orders table drawn page by page, with Omar's 15 orders shown on the pages where they really are. A full table scan reads all 621 pages to find the 15 blue ones.*
 
 #### Try this: a customer with more orders
 
@@ -404,7 +498,35 @@ An **index** is a separate structure that stores the values of one or more colum
 
 *Figure 6. Searching a B+tree for customer 4242: read the root page, follow one pointer to an internal page, then one more to the leaf page that holds the entries. Three page reads instead of about 670.*
 
-A B+tree is **balanced** (every leaf is at the same depth, so every lookup costs the same), has a **high fan-out** (one page holds hundreds of keys, so even a billion rows need only 3 or 4 levels) and has **linked leaves** (after the first match, neighbouring values are read in order, which makes ranges and sorting cheap). Create an index on the column in the WHERE clause:
+A B+tree is **balanced** (every leaf is at the same depth, so every lookup costs the same), has a **high fan-out** (one page holds hundreds of keys, so even a billion rows need only 3 or 4 levels) and has **linked leaves** (after the first match, neighbouring values are read in order, which makes ranges and sorting cheap).
+
+**The primary key is a B+tree too.** That is why searching by `order_id` was never slow. Imagine a table of only 2,000 orders, about 200 per page:
+
+```text
+PRIMARY (the table itself, sorted by order_id)
+
+root page:    [ 201 | 401 | 601 | 801 | 1001 | 1201 | 1401 | 1601 | 1801 ]
+                                                                       |
+leaf pages:   [1..200] [201..400] ... [1601..1800] [1801..2000] <------+
+                                                    binary search inside -> row 1999
+```
+
+To find order 1999, MySQL reads the root page (1999 is at least 1801, so it follows the last pointer), then reads that leaf page and searches inside it. That is 2 page reads and about 11 comparisons, not 1,999. On our real table:
+
+```sql
+EXPLAIN
+SELECT * FROM orders WHERE order_id = 1999;
+```
+
+Output:
+
+| type | possible_keys | key | rows | Extra |
+|---|---|---|---|---|
+| const | PRIMARY | PRIMARY | 1 | NULL |
+
+<sub>1 row returned in 0.0010 sec</sub>
+
+`type = const` means at most one row, found through the primary key: the fastest access there is. The slow case is a search on a column that has **no** index of its own, like `customer_id`. The table is sorted by `order_id`, which says nothing about customers, so MySQL must read every row. Create an index on the column in the WHERE clause:
 
 ```sql
 CREATE INDEX idx_cust ON orders (customer_id);
@@ -480,6 +602,78 @@ CREATE INDEX idx_cust_date ON orders (customer_id, order_date);
 
 *Figure 7. Entries of `idx_cust_date`. Omar's entries form one block that is already in date order. A query on the date alone cannot use the order, because matching dates are scattered.*
 
+**What is actually inside the index?** `SHOW INDEX` only describes it. To see the entries, select the same columns in the same order:
+
+```sql
+SELECT customer_id, order_date, order_id
+FROM orders
+WHERE customer_id BETWEEN 4241 AND 4243
+ORDER BY customer_id, order_date;
+```
+
+| customer_id | order_date | order_id |
+|---|---|---|
+| 4241 | 2025-12-19 21:38:48 | 196690 |
+| **4242** | **2024-02-13 00:48:55** | **11774** |
+| **4242** | **2024-04-05 11:09:31** | **26119** |
+| **4242** | **2024-06-23 07:32:32** | **47692** |
+| **4242** | ... 10 more ... | ... |
+| **4242** | **2025-10-13 19:48:33** | **178338** |
+| **4242** | **2025-11-06 11:00:24** | **184804** |
+| 4243 | 2024-04-19 10:30:44 | 29942 |
+
+These rows are what the index stores, in the order it stores them (trimmed here). Every entry holds three values:
+
+```text
+idx_cust_date entry:  ( customer_id , order_date          , order_id )
+                      (    4242     , 2025-11-06 11:00:24 , 184804   )
+                         search key   sort order inside     pointer to the
+                                      the customer block    full row (free)
+```
+
+- **customer_id** is what MySQL searches for: jump to 4242 in the B+tree.
+
+- **order_date** is not searched. It only decides the order of Omar's entries, so no sort is needed.
+
+- **order_id** is added to every entry automatically: InnoDB stores the primary key in every secondary index entry, as the pointer back to the full row in the table.
+
+Omar's 15 orders are scattered through the table (Figure 5) but sit **next to each other** in the index, already in date order. Now look at the description again:
+
+```sql
+SHOW INDEX FROM orders;
+```
+
+Output:
+
+| Key_name | Non_unique | Seq_in_index | Column_name | Cardinality |
+|---|---|---|---|---|
+| PRIMARY | 0 | 1 | order_id | 199465 |
+| idx_cust_date | 1 | 1 | customer_id | 19972 |
+| idx_cust_date | 1 | 2 | order_date | 199465 |
+
+<sub>3 rows returned in 0.0022 sec</sub>
+
+`idx_cust_date` appears twice because it has two columns (`Seq_in_index` 1 and 2). **Why is its cardinality only about 20,000 when there are 200,000 entries?** Cardinality counts *distinct values* of the columns up to that position, not entries. Each customer has about 10 orders, so the 200,000 entries contain only about 20,000 different `customer_id` values. Add `order_date` and almost every (customer, date) pair is different again. The exact counts:
+
+```sql
+SELECT COUNT(*)                                AS entries,
+       COUNT(DISTINCT customer_id)             AS customers,
+       COUNT(DISTINCT customer_id, order_date) AS customer_date
+FROM orders;
+```
+
+Output:
+
+| entries | customers | customer_date |
+|---|---|---|
+| 200000 | 20000 | 200000 |
+
+<sub>1 row returned in 0.1870 sec</sub>
+
+For the optimizer this is the useful number: 200,000 rows / 20,000 customers = about 10 rows per customer, so `WHERE customer_id = 4242` keeps a tiny share of the table and the index is worth using.
+
+Now explain the “My orders” query with the new index:
+
 ```sql
 EXPLAIN
 SELECT order_id, order_date, status, total_amount
@@ -523,6 +717,31 @@ Output:
 *Figure 8. The same query before and after: about 200,000 rows read and sorted, versus a few index pages and 15 rows already in order.*
 
 **The leftmost prefix rule.** A composite index on (A, B) helps conditions on A, or on A and B, but not on B alone. In the phone book, finding everyone named “Omar” (a first name) means reading the whole book. We test this in Step 6.
+
+#### Try this: the same query with and without the index
+
+`IGNORE INDEX` tells MySQL to act as if an index did not exist, so you can compare both plans without dropping anything. Run each query twice and compare the second **Duration**:
+
+```sql
+SELECT order_id, order_date, status, total_amount
+FROM orders IGNORE INDEX (idx_cust_date)
+WHERE customer_id = 4242
+ORDER BY order_date DESC;
+```
+
+```sql
+SELECT order_id, order_date, status, total_amount
+FROM orders
+WHERE customer_id = 4242
+ORDER BY order_date DESC;
+```
+
+| Query | type | key | rows read | Time (ours) |
+|---|---|---|---|---|
+| With `IGNORE INDEX` | ALL | NULL | 200,000 | 38 ms |
+| Normal | ref | idx_cust_date | 15 | 0.65 ms |
+
+Same 15 rows, about 58 times faster. In Workbench you will see roughly `0.03 sec` against `0.000 sec`.
 
 #### Try this: change the ORDER BY
 
@@ -589,6 +808,16 @@ InnoDB stores the table itself as a B+tree ordered by the primary key, called th
 ![twotrip](figures/fig_twotrip.png)
 
 *Figure 9. The second trip: from the secondary index to the clustered index (the table) for the columns the index does not have.*
+
+```text
+Trip 1: idx_cust_date  ->  find 4242, read its 15 entries (newest first)
+                           gives order_date and order_id = 184804, 178338, ...
+Trip 2: PRIMARY        ->  look up order 184804 -> status, total_amount
+                           look up order 178338 -> status, total_amount
+                           ... 15 times
+```
+
+Fifteen lookups by primary key are cheap. If the query asks only for columns the index already has, trip 2 disappears: `SELECT order_id, order_date ...` shows `Using index` in `Extra` and took 0.41 ms instead of 0.65 ms on our server.
 
 If an index contains **every** column the query needs, the second trip is skipped. The index **covers** the query, and `EXPLAIN` shows `Using index`:
 
